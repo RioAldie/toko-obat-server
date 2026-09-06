@@ -8,20 +8,49 @@ export class ProductsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async create(createProductDto: CreateProductDto) {
+    const { userId, ...productData } = createProductDto;
+
     const existingProduct = await this.prisma.product.findUnique({
-      where: { sku: createProductDto.sku },
+      where: { sku: productData.sku },
     });
 
     if (existingProduct) {
       throw new ConflictException('Product with this SKU already exists');
     }
 
-    return this.prisma.product.create({
-      data: createProductDto,
-      include: {
-        category: true,
-        unit: true,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const product = await tx.product.create({
+        data: productData,
+        include: {
+          category: true,
+          unit: true,
+        },
+      });
+
+      if (productData.stock && productData.stock > 0 && userId) {
+        await tx.stockMovement.create({
+          data: {
+            productId: product.id,
+            userId: userId,
+            type: 'IN', // MovementType.IN literal for simplicity since we are passing to DB
+            quantity: productData.stock,
+            reason: 'Initial Stock',
+          },
+        });
+      }
+
+      if (userId) {
+        await tx.productPriceHistory.create({
+          data: {
+            productId: product.id,
+            newCostPrice: productData.costPrice || 0,
+            newPrice: productData.price,
+            userId: userId,
+          }
+        });
+      }
+
+      return product;
     });
   }
 
@@ -49,24 +78,59 @@ export class ProductsService {
   }
 
   async update(id: string, updateProductDto: UpdateProductDto) {
-    await this.findOne(id); // ensure exists
+    const existingProduct = await this.findOne(id); // ensure exists
 
     if (updateProductDto.sku) {
-      const existingProduct = await this.prisma.product.findUnique({
+      const productWithSku = await this.prisma.product.findUnique({
         where: { sku: updateProductDto.sku },
       });
-      if (existingProduct && existingProduct.id !== id) {
+      if (productWithSku && productWithSku.id !== id) {
         throw new ConflictException('Product with this SKU already exists');
       }
     }
 
-    return this.prisma.product.update({
-      where: { id },
-      data: updateProductDto,
+    return this.prisma.$transaction(async (tx) => {
+      const { userId, ...updateData } = updateProductDto;
+
+      const product = await tx.product.update({
+        where: { id },
+        data: updateData,
+        include: {
+          category: true,
+          unit: true,
+        },
+      });
+
+      // Track price changes
+      const priceChanged = updateData.price !== undefined && Number(updateData.price) !== Number(existingProduct.price);
+      const costPriceChanged = updateData.costPrice !== undefined && Number(updateData.costPrice) !== Number(existingProduct.costPrice);
+
+      if ((priceChanged || costPriceChanged) && userId) {
+        await tx.productPriceHistory.create({
+          data: {
+            productId: product.id,
+            oldCostPrice: existingProduct.costPrice,
+            newCostPrice: updateData.costPrice !== undefined ? updateData.costPrice : existingProduct.costPrice,
+            oldPrice: existingProduct.price,
+            newPrice: updateData.price !== undefined ? updateData.price : existingProduct.price,
+            userId: userId,
+          }
+        });
+      }
+
+      return product;
+    });
+  }
+
+  async getPriceHistory(id: string) {
+    return this.prisma.productPriceHistory.findMany({
+      where: { productId: id },
       include: {
-        category: true,
-        unit: true,
+        user: {
+          select: { id: true, username: true, role: true }
+        }
       },
+      orderBy: { createdAt: 'desc' }
     });
   }
 

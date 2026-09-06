@@ -45,7 +45,26 @@ export class SalesService {
           if (!product) {
             throw new NotFoundException(`Product with ID ${item.productId} not found`);
           }
+          const roundedQuantity = Math.round(item.quantity);
+          if (product.stock < roundedQuantity) {
+            throw new BadRequestException(`Insufficient stock for product ${product.name}`);
+          }
           price = Number(product.price);
+
+          await tx.product.update({
+            where: { id: product.id },
+            data: { stock: product.stock - roundedQuantity },
+          });
+
+          await tx.stockMovement.create({
+            data: {
+              productId: product.id,
+              userId: userId,
+              type: MovementType.OUT,
+              quantity: roundedQuantity,
+              reason: `Sale ${invoiceNumber}`,
+            },
+          });
         } else if (item.productName && item.price !== undefined) {
           price = Number(item.price);
           productName = item.productName;
@@ -119,7 +138,10 @@ export class SalesService {
   }
 
   async cancelSale(id: string) {
-    const sale = await this.prisma.sale.findUnique({ where: { id } });
+    const sale = await this.prisma.sale.findUnique({ 
+      where: { id },
+      include: { saleDetails: true }
+    });
     if (!sale) {
       throw new NotFoundException(`Sale with ID ${id} not found`);
     }
@@ -128,9 +150,34 @@ export class SalesService {
       throw new BadRequestException(`Sale with ID ${id} is already canceled`);
     }
 
-    return this.prisma.sale.update({
-      where: { id },
-      data: { status: 'CANCELED' }
+    return this.prisma.$transaction(async (tx) => {
+      for (const detail of sale.saleDetails) {
+        if (detail.productId) {
+          const product = await tx.product.findUnique({ where: { id: detail.productId } });
+          if (product) {
+            const roundedQuantity = Math.round(Number(detail.quantity));
+            await tx.product.update({
+              where: { id: product.id },
+              data: { stock: product.stock + roundedQuantity }
+            });
+
+            await tx.stockMovement.create({
+              data: {
+                productId: product.id,
+                userId: sale.userId,
+                type: MovementType.IN,
+                quantity: roundedQuantity,
+                reason: `Canceled Sale ${sale.invoiceNumber}`
+              }
+            });
+          }
+        }
+      }
+
+      return tx.sale.update({
+        where: { id },
+        data: { status: 'CANCELED' }
+      });
     });
   }
 }

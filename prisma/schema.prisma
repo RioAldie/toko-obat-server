@@ -23,6 +23,7 @@ model User {
 
   sales           Sale[]
   stockMovements  StockMovement[]
+  priceHistories  ProductPriceHistory[]
 
   @@map("users")
 }
@@ -58,18 +59,36 @@ model Product {
   description String?
   categoryId  String   @map("category_id")
   unitId      String   @map("unit_id")
+  costPrice   Decimal  @default(0) @db.Decimal(10, 2) @map("cost_price")
   price       Decimal  @db.Decimal(10, 2)
   stock       Int      @default(0)
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  category    Category @relation(fields: [categoryId], references: [id])
-  unit        Unit     @relation(fields: [unitId], references: [id])
+  category    Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  unit        Unit     @relation(fields: [unitId], references: [id], onDelete: Cascade)
 
   saleDetails    SaleDetail[]
   stockMovements StockMovement[]
+  priceHistories ProductPriceHistory[]
 
   @@map("products")
+}
+
+model ProductPriceHistory {
+  id           String   @id @default(uuid())
+  productId    String   @map("product_id")
+  oldCostPrice Decimal? @db.Decimal(10, 2) @map("old_cost_price")
+  newCostPrice Decimal  @db.Decimal(10, 2) @map("new_cost_price")
+  oldPrice     Decimal? @db.Decimal(10, 2) @map("old_price")
+  newPrice     Decimal  @db.Decimal(10, 2) @map("new_price")
+  userId       String   @map("user_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("product_price_history")
 }
 
 enum SaleStatus {
@@ -87,7 +106,7 @@ model Sale {
   status        SaleStatus @default(COMPLETED)
   createdAt     DateTime   @default(now()) @map("created_at")
 
-  user          User         @relation(fields: [userId], references: [id])
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   saleDetails   SaleDetail[]
 
   @@map("sales")
@@ -102,8 +121,8 @@ model SaleDetail {
   price       Decimal  @db.Decimal(10, 2)
   subtotal    Decimal  @db.Decimal(10, 2)
 
-  sale      Sale     @relation(fields: [saleId], references: [id])
-  product   Product? @relation(fields: [productId], references: [id])
+  sale      Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product   Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@map("sale_details")
 }
@@ -123,8 +142,8 @@ model StockMovement {
   reason      String?
   createdAt   DateTime     @default(now()) @map("created_at")
 
-  product     Product      @relation(fields: [productId], references: [id])
-  user        User         @relation(fields: [userId], references: [id])
+  product     Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("stock_movements")
 }

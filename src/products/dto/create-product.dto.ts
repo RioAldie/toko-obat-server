@@ -25,6 +25,11 @@ export class CreateProductDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   @Type(() => Number)
+  costPrice: number;
+
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Type(() => Number)
   price: number;
 
   @IsInt()
@@ -32,4 +37,8 @@ export class CreateProductDto {
   @IsOptional()
   @Type(() => Number)
   stock?: number;
+
+  @IsString()
+  @IsOptional()
+  userId?: string;
 }

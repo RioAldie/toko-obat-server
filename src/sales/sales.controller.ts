@@ -1,13 +1,18 @@
-import { Controller, Get, Post, Body, Param, Put } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Put, UseGuards, Req } from '@nestjs/common';
 import { SalesService } from './sales.service';
 import { CreateSaleDto } from './dto/create-sale.dto';
+import { AuthGuard } from '../auth/auth.guard';
 
 @Controller('sales')
+@UseGuards(AuthGuard)
 export class SalesController {
   constructor(private readonly salesService: SalesService) {}
 
   @Post()
-  create(@Body() createSaleDto: CreateSaleDto) {
+  create(@Req() req, @Body() createSaleDto: CreateSaleDto) {
+    if (req.user && req.user.sub) {
+      createSaleDto.userId = req.user.sub;
+    }
     return this.salesService.createSale(createSaleDto);
   }
 

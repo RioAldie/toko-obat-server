@@ -55,8 +55,15 @@ export class UnitsService {
 
   async remove(id: string) {
     await this.findOne(id); // ensure exists
-    return this.prisma.unit.delete({
-      where: { id },
-    });
+    try {
+      return await this.prisma.unit.delete({
+        where: { id },
+      });
+    } catch (error: any) {
+      if (error.code === 'P2003') {
+        throw new ConflictException('Tidak dapat menghapus satuan ini karena masih digunakan oleh produk.');
+      }
+      throw error;
+    }
   }
 }

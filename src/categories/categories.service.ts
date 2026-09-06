@@ -55,8 +55,15 @@ export class CategoriesService {
 
   async remove(id: string) {
     await this.findOne(id); // ensure exists
-    return this.prisma.category.delete({
-      where: { id },
-    });
+    try {
+      return await this.prisma.category.delete({
+        where: { id },
+      });
+    } catch (error: any) {
+      if (error.code === 'P2003') {
+        throw new ConflictException('Tidak dapat menghapus kategori ini karena masih digunakan oleh produk.');
+      }
+      throw error;
+    }
   }
 }
