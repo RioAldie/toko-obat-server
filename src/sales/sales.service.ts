@@ -10,6 +10,11 @@ export class SalesService {
   async createSale(createSaleDto: CreateSaleDto) {
     const { userId, items, buyerName, note } = createSaleDto;
 
+    // Collect all product IDs in a single list
+    const productIds = items
+      .map(i => i.productId)
+      .filter((id): id is string => Boolean(id));
+
     return this.prisma.$transaction(async (tx) => {
       // 1. Verify user
       const user = await tx.user.findUnique({ where: { id: userId } });
@@ -17,8 +22,22 @@ export class SalesService {
         throw new NotFoundException(`User with ID ${userId} not found`);
       }
 
+      // 2. Fetch all needed products in ONE single query (avoids WAN latency timeouts)
+      const products = productIds.length > 0
+        ? await tx.product.findMany({ where: { id: { in: productIds } } })
+        : [];
+      const productMap = new Map(products.map(p => [p.id, p]));
+
+      for (const id of productIds) {
+        if (!productMap.has(id)) {
+          throw new NotFoundException(`Product with ID ${id} not found`);
+        }
+      }
+
       let totalAmount = 0;
       const saleDetailsData: Prisma.SaleDetailCreateManyInput[] = [];
+      const stockMovementsData: Prisma.StockMovementCreateManyInput[] = [];
+      const stockUpdates: { id: string; newStock: number }[] = [];
 
       // Generate invoice number
       const date = new Date();
@@ -35,35 +54,31 @@ export class SalesService {
         }
       });
 
-      // 2. Process each item
+      // 3. Process each item in memory
       for (const item of items) {
         let price = 0;
         let productName: string | null = null;
 
         if (item.productId) {
-          const product = await tx.product.findUnique({ where: { id: item.productId } });
-          if (!product) {
-            throw new NotFoundException(`Product with ID ${item.productId} not found`);
-          }
+          const product = productMap.get(item.productId)!;
           const roundedQuantity = Math.round(item.quantity);
           if (product.stock < roundedQuantity) {
             throw new BadRequestException(`Insufficient stock for product ${product.name}`);
           }
           price = Number(product.price);
+          product.stock -= roundedQuantity;
 
-          await tx.product.update({
-            where: { id: product.id },
-            data: { stock: product.stock - roundedQuantity },
+          stockUpdates.push({
+            id: product.id,
+            newStock: product.stock,
           });
 
-          await tx.stockMovement.create({
-            data: {
-              productId: product.id,
-              userId: userId,
-              type: MovementType.OUT,
-              quantity: roundedQuantity,
-              reason: `Sale ${invoiceNumber}`,
-            },
+          stockMovementsData.push({
+            productId: product.id,
+            userId: userId,
+            type: MovementType.OUT,
+            quantity: roundedQuantity,
+            reason: `Sale ${invoiceNumber}`,
           });
         } else if (item.productName && item.price !== undefined) {
           price = Number(item.price);
@@ -72,7 +87,7 @@ export class SalesService {
           throw new BadRequestException('Item must have either a valid productId or productName with price');
         }
 
-        const subtotal = price * item.quantity;
+        const subtotal = Math.round(price * item.quantity * 100) / 100;
         totalAmount += subtotal;
 
         // Prepare sale detail
@@ -86,13 +101,29 @@ export class SalesService {
         });
       }
 
-      // Bulk create sale details
+      // 4. Batch update products in parallel
+      if (stockUpdates.length > 0) {
+        await Promise.all(
+          stockUpdates.map(u =>
+            tx.product.update({
+              where: { id: u.id },
+              data: { stock: u.newStock },
+            })
+          )
+        );
+      }
+
+      // 5. Bulk create stock movements and sale details
+      if (stockMovementsData.length > 0) {
+        await tx.stockMovement.createMany({ data: stockMovementsData });
+      }
+
       await tx.saleDetail.createMany({ data: saleDetailsData });
 
-      // Update total amount on sale
+      // 6. Update total amount on sale
       const updatedSale = await tx.sale.update({
         where: { id: sale.id },
-        data: { totalAmount },
+        data: { totalAmount: Math.round(totalAmount * 100) / 100 },
         include: {
           saleDetails: {
             include: {
@@ -107,6 +138,9 @@ export class SalesService {
       });
 
       return updatedSale;
+    }, {
+      maxWait: 10000,
+      timeout: 30000,
     });
   }
 
@@ -162,33 +196,61 @@ export class SalesService {
     }
 
     return this.prisma.$transaction(async (tx) => {
-      for (const detail of sale.saleDetails) {
-        if (detail.productId) {
-          const product = await tx.product.findUnique({ where: { id: detail.productId } });
-          if (product) {
-            const roundedQuantity = Math.round(Number(detail.quantity));
-            await tx.product.update({
-              where: { id: product.id },
-              data: { stock: product.stock + roundedQuantity }
-            });
+      const productIds = sale.saleDetails
+        .map(d => d.productId)
+        .filter((pid): pid is string => Boolean(pid));
 
-            await tx.stockMovement.create({
-              data: {
-                productId: product.id,
-                userId: sale.userId,
-                type: MovementType.IN,
-                quantity: roundedQuantity,
-                reason: `Canceled Sale ${sale.invoiceNumber}`
-              }
-            });
-          }
+      const products = productIds.length > 0
+        ? await tx.product.findMany({ where: { id: { in: productIds } } })
+        : [];
+      const productMap = new Map(products.map(p => [p.id, p]));
+
+      const stockMovementsData: Prisma.StockMovementCreateManyInput[] = [];
+      const stockUpdates: { id: string; newStock: number }[] = [];
+
+      for (const detail of sale.saleDetails) {
+        if (detail.productId && productMap.has(detail.productId)) {
+          const product = productMap.get(detail.productId)!;
+          const roundedQuantity = Math.round(Number(detail.quantity));
+          product.stock += roundedQuantity;
+
+          stockUpdates.push({
+            id: product.id,
+            newStock: product.stock
+          });
+
+          stockMovementsData.push({
+            productId: product.id,
+            userId: sale.userId,
+            type: MovementType.IN,
+            quantity: roundedQuantity,
+            reason: `Canceled Sale ${sale.invoiceNumber}`
+          });
         }
+      }
+
+      if (stockUpdates.length > 0) {
+        await Promise.all(
+          stockUpdates.map(u =>
+            tx.product.update({
+              where: { id: u.id },
+              data: { stock: u.newStock }
+            })
+          )
+        );
+      }
+
+      if (stockMovementsData.length > 0) {
+        await tx.stockMovement.createMany({ data: stockMovementsData });
       }
 
       return tx.sale.update({
         where: { id },
         data: { status: 'CANCELED' }
       });
+    }, {
+      maxWait: 10000,
+      timeout: 30000,
     });
   }
 
@@ -205,27 +267,52 @@ export class SalesService {
     return this.prisma.$transaction(async (tx) => {
       // If the sale was NOT canceled, restore stock to products
       if (sale.status !== 'CANCELED') {
-        for (const detail of sale.saleDetails) {
-          if (detail.productId) {
-            const product = await tx.product.findUnique({ where: { id: detail.productId } });
-            if (product) {
-              const roundedQuantity = Math.round(Number(detail.quantity));
-              await tx.product.update({
-                where: { id: product.id },
-                data: { stock: product.stock + roundedQuantity }
-              });
+        const productIds = sale.saleDetails
+          .map(d => d.productId)
+          .filter((pid): pid is string => Boolean(pid));
 
-              await tx.stockMovement.create({
-                data: {
-                  productId: product.id,
-                  userId: sale.userId,
-                  type: MovementType.IN,
-                  quantity: roundedQuantity,
-                  reason: `Deleted Sale ${sale.invoiceNumber}`
-                }
-              });
-            }
+        const products = productIds.length > 0
+          ? await tx.product.findMany({ where: { id: { in: productIds } } })
+          : [];
+        const productMap = new Map(products.map(p => [p.id, p]));
+
+        const stockMovementsData: Prisma.StockMovementCreateManyInput[] = [];
+        const stockUpdates: { id: string; newStock: number }[] = [];
+
+        for (const detail of sale.saleDetails) {
+          if (detail.productId && productMap.has(detail.productId)) {
+            const product = productMap.get(detail.productId)!;
+            const roundedQuantity = Math.round(Number(detail.quantity));
+            product.stock += roundedQuantity;
+
+            stockUpdates.push({
+              id: product.id,
+              newStock: product.stock
+            });
+
+            stockMovementsData.push({
+              productId: product.id,
+              userId: sale.userId,
+              type: MovementType.IN,
+              quantity: roundedQuantity,
+              reason: `Deleted Sale ${sale.invoiceNumber}`
+            });
           }
+        }
+
+        if (stockUpdates.length > 0) {
+          await Promise.all(
+            stockUpdates.map(u =>
+              tx.product.update({
+                where: { id: u.id },
+                data: { stock: u.newStock }
+              })
+            )
+          );
+        }
+
+        if (stockMovementsData.length > 0) {
+          await tx.stockMovement.createMany({ data: stockMovementsData });
         }
       }
 
@@ -236,6 +323,9 @@ export class SalesService {
       return tx.sale.delete({
         where: { id }
       });
+    }, {
+      maxWait: 10000,
+      timeout: 30000,
     });
   }
 }
