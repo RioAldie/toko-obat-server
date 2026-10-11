@@ -180,4 +180,51 @@ export class SalesService {
       });
     });
   }
+
+  async deleteSale(id: string) {
+    const sale = await this.prisma.sale.findUnique({
+      where: { id },
+      include: { saleDetails: true }
+    });
+
+    if (!sale) {
+      throw new NotFoundException(`Sale with ID ${id} not found`);
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      // If the sale was NOT canceled, restore stock to products
+      if (sale.status !== 'CANCELED') {
+        for (const detail of sale.saleDetails) {
+          if (detail.productId) {
+            const product = await tx.product.findUnique({ where: { id: detail.productId } });
+            if (product) {
+              const roundedQuantity = Math.round(Number(detail.quantity));
+              await tx.product.update({
+                where: { id: product.id },
+                data: { stock: product.stock + roundedQuantity }
+              });
+
+              await tx.stockMovement.create({
+                data: {
+                  productId: product.id,
+                  userId: sale.userId,
+                  type: MovementType.IN,
+                  quantity: roundedQuantity,
+                  reason: `Deleted Sale ${sale.invoiceNumber}`
+                }
+              });
+            }
+          }
+        }
+      }
+
+      await tx.saleDetail.deleteMany({
+        where: { saleId: id }
+      });
+
+      return tx.sale.delete({
+        where: { id }
+      });
+    });
+  }
 }
