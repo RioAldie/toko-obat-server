@@ -96,7 +96,11 @@ export class SalesService {
         include: {
           saleDetails: {
             include: {
-              product: true
+              product: {
+                include: {
+                  unit: true
+                }
+              }
             }
           }
         }
@@ -124,7 +128,14 @@ export class SalesService {
         user: { select: { id: true, username: true } },
         saleDetails: {
           include: {
-            product: { select: { id: true, name: true, sku: true } }
+            product: { 
+              select: { 
+                id: true, 
+                name: true, 
+                sku: true,
+                unit: { select: { id: true, name: true } }
+              } 
+            }
           }
         }
       }
